@@ -163,9 +163,12 @@ def inference(images):
         softmax_linear = tf.add(tf.matmul(local4,weights),biases,name = scope.name)
         _activation_summary(softmax_linear)
     return softmax_linear
-
-
-    
+def loss(logits,labels):
+    labels = tf.cast(labels,tf.int64)
+    cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(labels = labels,logits = logits,name = 'cross_entropy_per_exmaple')
+    cross_entropy_mean = tf.reduce_mean(cross_entropy,name = 'cross_entropy')
+    tf.add_to_collection('losses',cross_entropy_mean)
+    return tf.add_n(tf.get_collection('losses'),name = 'totoal_loss')
 if __name__ == "__main__":
 
     """test dataloader"""
@@ -192,10 +195,16 @@ if __name__ == "__main__":
     #     coord.join(thread)
     """"test inference"""
     im =np.zeros((1,32,32,3))
+    label_np = np.array([[1,2,3,4]])
     images = tf.placeholder(shape = [1,32,32,3],dtype = tf.float32,name = 'images')
+    labels = tf.placeholder(shape = [1],dtype = tf.int64,name = 'labels')
+
     softmax = inference(images)
+    val = loss(softmax,labels)
     with tf.Session() as sess:
         tf.local_variables_initializer().run()
         tf.global_variables_initializer().run()
-        rst = sess.run(softmax,feed_dict = {images:im})
-        print(rst.shape)
+        # softmax = sess.run(softmax, feed_dict={images: im})
+        # print(softmax.shape)
+        rst = sess.run(val,feed_dict = {images:im,labels:np.argmax(label_np,1)})
+        print(rst)
