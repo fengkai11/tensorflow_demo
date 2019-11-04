@@ -5,14 +5,19 @@ import numpy as np
 import tensorflow as tf
 import cv2
 import re
+import time
+from datetime import datetime
 
 
 FLAGS = tf.app.flags.FLAGS
-tf.app.flags.DEFINE_string('train_dir','',""""Directory where to write event logs""")
-
-tf.app.flags.DEFINE_integer('max_steps',10000,""""Number of batch to run""")
+tf.app.flags.DEFINE_string('train_dir',r'D:\my_code\project\tensorflow_demo\log',""""Directory where to write event logs""")
+tf.app.flags.DEFINE_boolean('log_device_placement', False,
+                            """Whether to log device placement.""")
+tf.app.flags.DEFINE_integer('max_steps',100000,""""Number of batch to run""")
 tf.app.flags.DEFINE_string('data_dir',r'D:\my_code\project\tensorflow_demo\data\cifar-10-batches-bin',"""Patch to cifar10 directory""")
-tf.app.flags.DEFINE_integer('batch_size',1,"""Number of images to process in a batch""")
+tf.app.flags.DEFINE_integer('batch_size',32,"""Number of images to process in a batch""")
+tf.app.flags.DEFINE_integer('log_frequency', 10,
+                            """How often to log results to the console.""")
 
 IMAGES_SIZE = 24
 NUM_CLASS = 10
@@ -47,7 +52,9 @@ def read_cifar10(filename_queue):
     record_im = tf.decode_raw(value,tf.uint8)
     result.label = tf.cast(tf.slice(record_im,[0],[label_bytes]),tf.int32)
     depth_major = tf.reshape(tf.slice(record_im,[label_bytes],[image_bytes]),[result.depth,result.height,result.width])
-    result.uint8image = tf.transpose(depth_major,[1,2,0])
+    reshaped_image = tf.cast(depth_major, tf.float32)
+    result.uint8image = tf.transpose(reshaped_image,[1,2,0])
+
     return result
 def distorted_inputs(batch_size):
     """
@@ -169,42 +176,119 @@ def loss(logits,labels):
     cross_entropy_mean = tf.reduce_mean(cross_entropy,name = 'cross_entropy')
     tf.add_to_collection('losses',cross_entropy_mean)
     return tf.add_n(tf.get_collection('losses'),name = 'totoal_loss')
-if __name__ == "__main__":
 
-    """test dataloader"""
-    # images, labels = distorted_inputs(batch_size=FLAGS.batch_size)
-    # im = images[0]
-    # with tf.Session() as sess:
-    #
-    #     tf.local_variables_initializer().run()
-    #     tf.global_variables_initializer().run()
-    #     coord = tf.train.Coordinator()
-    #     thread = tf.train.start_queue_runners(sess=sess, coord=coord)
-    #     try:
-    #         while not coord.should_stop():
-    #             imgs = sess.run(im)
-    #             print(imgs.shape)
-    #             r, g, b = cv2.split(imgs)
-    #             imgs = cv2.merge([b, g, r])
-    #             cv2.imshow('test', imgs)
-    #             cv2.waitKey(0)
-    #     except tf.errors.OutOfRangeError:
-    #         print('done')
-    #     finally:
-    #         coord.request_stop()
-    #     coord.join(thread)
-    """"test inference"""
-    im =np.zeros((1,32,32,3))
-    label_np = np.array([[1,2,3,4]])
-    images = tf.placeholder(shape = [1,32,32,3],dtype = tf.float32,name = 'images')
-    labels = tf.placeholder(shape = [1],dtype = tf.int64,name = 'labels')
+MOVING_AVERAGE_DECAY = 0.9999
+NUM_EPOCHS_PER_DECAY = 350.0
+LEARNING_RATE_DECAY_FACTOR = 0.1
+INITIAL_LEARNING_RATE = 0.1
+def _add_loss_summaries(total_loss):
+    loss_averages = tf.train.ExponentialMovingAverage(0.9,name = 'avg')
+    losses = tf.get_collection('losses')
+    loss_averages_op = loss_averages.apply(losses + [total_loss])
+    for l in losses+[total_loss]:
+        tf.summary.scalar(l.op.name+'(raw)',1)
+        tf.summary.scalar(l.op.name,loss_averages.average(l))
+    return loss_averages_op
+def train(total_loss,global_step):
+    num_batches_per_epoch = NUM_EXAMPLES_PER_EPOCH_FOR_TRAIN / FLAGS.batch_size
+    decay_steps = int(num_batches_per_epoch*NUM_EPOCHS_PER_DECAY)
+    lr = tf.train.exponential_decay(INITIAL_LEARNING_RATE,global_step,decay_steps,LEARNING_RATE_DECAY_FACTOR,staircase=True)
+    tf.summary.scalar('learning_rate',lr)
+    loss_average_op = _add_loss_summaries(total_loss)
+    with tf.control_dependencies([loss_average_op]):
+        opt = tf.train.GradientDescentOptimizer(lr)
+        grads = opt.compute_gradients(total_loss)
+    apply_gradient_op = opt.apply_gradients(grads, global_step=global_step)
 
-    softmax = inference(images)
-    val = loss(softmax,labels)
-    with tf.Session() as sess:
-        tf.local_variables_initializer().run()
-        tf.global_variables_initializer().run()
-        # softmax = sess.run(softmax, feed_dict={images: im})
-        # print(softmax.shape)
-        rst = sess.run(val,feed_dict = {images:im,labels:np.argmax(label_np,1)})
-        print(rst)
+
+    for var in tf.trainable_variables():
+        tf.summary.histogram(var.op.name, var)
+    for grad, var in grads:
+        if grad is not None:
+            tf.summary.histogram(var.op.name + '/gradients', grad)
+    variable_averages = tf.train.ExponentialMovingAverage(MOVING_AVERAGE_DECAY, global_step)
+    with tf.control_dependencies([apply_gradient_op]):
+        variables_averages_op = variable_averages.apply(tf.trainable_variables())
+    return variables_averages_op
+
+
+images, labels = distorted_inputs(batch_size=FLAGS.batch_size)
+logits = inference(images)
+loss = loss(logits, labels)
+global_step = tf.train.get_or_create_global_step()# tf.Variable(0, trainable=False)
+train_op = train(loss, global_step)
+saver = tf.train.Saver(tf.all_variables())
+summary_op = tf.summary.merge_all()
+init = tf.initialize_all_variables()
+
+sess = tf.Session(config=tf.ConfigProto(log_device_placement=FLAGS.log_device_placement))
+sess.run(init)
+tf.train.start_queue_runners(sess=sess)
+summary_writer = tf.summary.FileWriter(FLAGS.train_dir, graph_def=sess.graph_def)
+
+for step in range(FLAGS.max_steps):
+    # 记录运行计算图一次的时间
+    start_time = time.time()
+    _, loss_value = sess.run([train_op, loss])
+    duration = time.time() - start_time
+
+    assert not np.isnan(loss_value), 'Model diverged with loss = NaN'
+
+    if step % 100 == 0:
+        num_examples_per_step = FLAGS.batch_size
+        examples_per_sec = num_examples_per_step / duration
+        sec_per_batch = float(duration)
+
+        format_str = ('%s: step %d, loss = %.2f (%.1f examples/sec; %.3f '
+                      'sec/batch)')
+        print(format_str % (datetime.now(), step, loss_value,
+                            examples_per_sec, sec_per_batch))
+
+    if step % 1000 == 0:
+        # 添加summary日志
+        summary_str = sess.run(summary_op)
+        summary_writer.add_summary(summary_str, step)
+
+    # 定期保存模型检查点
+    if step % 1000 == 0 or (step + 1) == FLAGS.max_steps:
+        checkpoint_path = os.path.join(FLAGS.train_dir, 'model.ckpt')
+        saver.save(sess, checkpoint_path, global_step=step)
+# if __name__ == "__main__":
+#
+#     """test dataloader"""
+#     # images, labels = distorted_inputs(batch_size=FLAGS.batch_size)
+#     # im = images[0]
+#     # with tf.Session() as sess:
+#     #
+#     #     tf.local_variables_initializer().run()
+#     #     tf.global_variables_initializer().run()
+#     #     coord = tf.train.Coordinator()
+#     #     thread = tf.train.start_queue_runners(sess=sess, coord=coord)
+#     #     try:
+#     #         while not coord.should_stop():
+#     #             imgs = sess.run(im)
+#     #             print(imgs.shape)
+#     #             r, g, b = cv2.split(imgs)
+#     #             imgs = cv2.merge([b, g, r])
+#     #             cv2.imshow('test', imgs)
+#     #             cv2.waitKey(0)
+#     #     except tf.errors.OutOfRangeError:
+#     #         print('done')
+#     #     finally:
+#     #         coord.request_stop()
+#     #     coord.join(thread)
+#     """"test inference"""
+#     im =np.zeros((1,32,32,3))
+#     label_np = np.array([[1,2,3,4]])
+#     images = tf.placeholder(shape = [1,32,32,3],dtype = tf.float32,name = 'images')
+#     labels = tf.placeholder(shape = [1],dtype = tf.int64,name = 'labels')
+#
+#     softmax = inference(images)
+#     val = loss(softmax,labels)
+#     with tf.Session() as sess:
+#         tf.local_variables_initializer().run()
+#         tf.global_variables_initializer().run()
+#         # softmax = sess.run(softmax, feed_dict={images: im})
+#         # print(softmax.shape)
+#         rst = sess.run(val,feed_dict = {images:im,labels:np.argmax(label_np,1)})
+#         print(rst)
