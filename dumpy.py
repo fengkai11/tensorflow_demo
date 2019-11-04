@@ -96,7 +96,7 @@ def _variable_with_weight_decay(name,shape,stddev,wd):
     """
     var = _variable_on_cpu(name,shape,tf.truncated_normal_initializer(stddev = stddev))
     if wd is not None:
-        weight_decay = tf.multipy(tf.nn.l2_loss(var),wd,name='weight_loss')
+        weight_decay = tf.multiply(tf.nn.l2_loss(var),wd,name='weight_loss')
         tf.add_to_collection('losses',weight_decay)
     return var
 def _variable_on_cpu(name,shape,initializer):
@@ -135,7 +135,7 @@ def inference(images):
     pool1 = tf.nn.max_pool(conv1,ksize = [1,3,3,1],strides = [1,2,2,1],padding = 'SAME',name = 'pool1')
     # norm1 = tf.nn.lrn()
     #TODO:BN
-    with tf.variable_sope('conv2') as scope:
+    with tf.variable_scope('conv2') as scope:
         kernel = _variable_with_weight_decay('weights',shape = [5,5,64,64],stddev = 1e-4,wd = 0.0)
         conv = tf.nn.conv2d(pool1,kernel,[1,1,1,1],padding = 'SAME')
         biases  = _variable_on_cpu('biases',[64],tf.constant_initializer(0.0))
@@ -143,33 +143,59 @@ def inference(images):
         conv2 = tf.nn.relu(bias,name = scope.name)
         _activation_summary(conv2)
     pool2 = tf.nn.max_pool(conv2,ksize = [1,3,3,1],strides = [1,2,2,1],padding = 'SAME',name = 'pool2')
-
-
+    with tf.variable_scope('loc3') as scope:
+        dim = 1
+        for d in pool2.get_shape()[1:].as_list():
+            dim *= d
+        reshape = tf.reshape(pool2,[FLAGS.batch_size,dim])
+        weights = _variable_with_weight_decay('weights',shape = [dim,384],stddev = 0.04,wd = 0.004)
+        biases = _variable_on_cpu('biases',[384],tf.constant_initializer(0.1))
+        local3 = tf.nn.relu(tf.matmul(reshape,weights)+biases,name = scope.name)
+        _activation_summary(local3)
+    with tf.variable_scope('loc4') as scope:
+        weights = _variable_with_weight_decay('weights',shape = [384,192],stddev = 0.04,wd = 0.004)
+        biases = _variable_on_cpu('biases',[192],tf.constant_initializer(0.1))
+        local4 = tf.nn.relu(tf.matmul(local3,weights)+biases,name = scope.name)
+        _activation_summary(local4)
+    with tf.variable_scope('softmax_linear') as scope:
+        weights = _variable_with_weight_decay('weights',shape = [192,NUM_CLASS],stddev = 1/192,wd= 0.0)
+        biases = _variable_on_cpu('biases',[NUM_CLASS],tf.constant_initializer(0.0))
+        softmax_linear = tf.add(tf.matmul(local4,weights),biases,name = scope.name)
+        _activation_summary(softmax_linear)
+    return softmax_linear
 
 
     
 if __name__ == "__main__":
-    images, labels = distorted_inputs(batch_size=FLAGS.batch_size)
-    im = images[0]
 
+    """test dataloader"""
+    # images, labels = distorted_inputs(batch_size=FLAGS.batch_size)
+    # im = images[0]
+    # with tf.Session() as sess:
+    #
+    #     tf.local_variables_initializer().run()
+    #     tf.global_variables_initializer().run()
+    #     coord = tf.train.Coordinator()
+    #     thread = tf.train.start_queue_runners(sess=sess, coord=coord)
+    #     try:
+    #         while not coord.should_stop():
+    #             imgs = sess.run(im)
+    #             print(imgs.shape)
+    #             r, g, b = cv2.split(imgs)
+    #             imgs = cv2.merge([b, g, r])
+    #             cv2.imshow('test', imgs)
+    #             cv2.waitKey(0)
+    #     except tf.errors.OutOfRangeError:
+    #         print('done')
+    #     finally:
+    #         coord.request_stop()
+    #     coord.join(thread)
+    """"test inference"""
+    im =np.zeros((1,32,32,3))
+    images = tf.placeholder(shape = [1,32,32,3],dtype = tf.float32,name = 'images')
+    softmax = inference(images)
     with tf.Session() as sess:
-
         tf.local_variables_initializer().run()
         tf.global_variables_initializer().run()
-        coord = tf.train.Coordinator()
-        thread = tf.train.start_queue_runners(sess=sess, coord=coord)
-        try:
-            while not coord.should_stop():
-                imgs = sess.run(im)
-                print(imgs.shape)
-                r, g, b = cv2.split(imgs)
-                imgs = cv2.merge([b, g, r])
-                cv2.imshow('test', imgs)
-                cv2.waitKey(0)
-        except tf.errors.OutOfRangeError:
-            print('done')
-        finally:
-            coord.request_stop()
-        coord.join(thread)
-
-
+        rst = sess.run(softmax,feed_dict = {images:im})
+        print(rst.shape)
