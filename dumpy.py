@@ -274,7 +274,7 @@ for step in range(FLAGS.max_steps):
 #     #             cv2.waitKey(0)
 #     #     except tf.errors.OutOfRangeError:
 #     #         print('done')
-#     #     finally:
+#     #     finally:z
 #     #         coord.request_stop()
 #     #     coord.join(thread)
 #     """"test inference"""
